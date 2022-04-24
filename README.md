@@ -2,7 +2,7 @@
 
 ## Main Idea
 
-"SuperBin" is a smart bin with the purpose to optimize the usage 
+"SuperBin" is a smart bin with the purpose to optimize the waste management system in a companies.
 
 ## Documents
 
