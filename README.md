@@ -1,19 +1,19 @@
-## SuperBin
+# SuperBin
 
-# Main Idea
+## Main Idea
 
 "SuperBin" is a smart bin with the purpose to optimize the usage 
 
-# Documents
+## Documents
 
 - [Concept]()
 - [Technology]()
 - [Evaluation]()
 
 
-# Video
+## Video
 - [SuperBin]()
 
-# Blog post
+## Blog post
 
 [Blog post](LINK HERE)
