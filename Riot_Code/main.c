@@ -4,12 +4,16 @@
 #include "msg.h"
 #include "net/emcute.h"
 #include "net/ipv6/addr.h"
+#include "net/netopt.h"
 #include "periph/gpio.h"
 #include "xtimer.h"
-#include "thread.h"
 #include "servo.h"
-#include "pir_params.h"
+#include "cpu.h"
+#include "board.h"
+#include "periph/pwm.h"
+
 #include "pir.h"
+
 #include "main.h"
 
 
@@ -23,12 +27,14 @@
 */
 //servo
 #define DEV         PWM_DEV(0)
-#define CHANNEL     0
+#define CHANNEL     1
 #define SERVO_MIN        (1000U)
 #define SERVO_MAX        (2000U)
 
+#define 	PIR_PARAM_GPIO   GPIO_PIN(PORT_B,4)
+
 //macros for bin
-#define BIN_THRESHOLD                100
+#define BIN_THRESHOLD                5
 
 //macros for mqtt
 #define EMCUTE_PRIO         (THREAD_PRIORITY_MAIN - 1)
@@ -36,9 +42,9 @@
 #define NUMOFSUBS           (16U)
 #define TOPIC_MAXLEN        (64U)
 
-//messe nel makefile vedere se va 
-/*#define BROKER_PORT         1885
-#define BROKER_ADDRESS      "2000:2::1"*/
+
+#define BROKER_PORT         1885
+#define BROKER_ADDRESS      "fec0:affe::1"
 
 #define DEFAULT_INTERFACE   ("4")
 #define DEVICE_IP_ADDRESS   ("fec0:affe::99")
@@ -61,6 +67,10 @@ static servo_t servo;
 
 //if bin_cover=0 -> closed, otherwise -> open
 static int bin_cover=0;
+//if = 0 bin empty otherwise full
+int full = 0;
+
+extern int _gnrc_netif_config(int argc, char **argv);
 
 //ultrasonic sensor definition
 gpio_t trigger_pin = GPIO_PIN(PORT_B, 3); //D3 
@@ -69,13 +79,11 @@ uint32_t echo_time;
 uint32_t echo_time_start;
 
 //pir sensor definition
-pir_params_t pir_params;
-pir_params.gpio = GPIO_PIN(PORT_B,4);
+pir_params_t pir_parameters;
 pir_t dev;
 
-
 //led definition
-gpio_t led_pin = GPIO_PIN(PORT_B, 10); //D6
+gpio_t led_pin = GPIO_PIN(PORT_B, 10); //D7
 
 
 //mqtt
@@ -161,27 +169,10 @@ static int get_connection(void){
     return 0;
 }
 
-static int ipv6_addr_add(char *name, char *ip_address){
+static int ipv6_addr_add(char *ip_address){
 
-    netif_t *iterface = netif_get_by_name(name); 
-    if(iterface == NULL){
-        puts("error to get interface");
-        return 1;
-    }
-
-    ipv6_addr_t ipv6;
-    
-    if(ipv6_addr_from_str(&ipv6, ip_address) == NULL){
-        puts("Error in parsing ipv6 address");
-        return 1;
-    }
- 
-    if(netif_set_opt(iface, NETOPT_IPV6_ADDR, GNRC_NETIF_IPV6_ADDRS_FLAGS_STATE_VALID, &ipv6, sizeof(ipv6)) < 0){
-            puts("Error in Adding ipv6 address");
-            return 1;
-        }
-    printf("Added %s with prefix %d to interface %s\n", ip_address, IPV6_PREFIX_LEN, name);
-    return 0;
+    char * arg[] = {"ifconfig", "4", "add", ip_address};
+    return _gnrc_netif_config(4, arg);
 }
 
 
@@ -203,44 +194,56 @@ void echo_cb(void* arg){
 
 //ultrasonic sensor read distance
 int read_distance(void){ 
-	echo_time = 0;
-	gpio_clear(trigger_pin);
-	xtimer_usleep(20);
-	gpio_set(trigger_pin);
-	xtimer_msleep(100);
-	return echo_time;
+	
+	uint32_t dist;
+    dist=0;
+    echo_time = 0;
+
+    gpio_clear(trigger_pin);
+    xtimer_usleep(20); 
+    gpio_set(trigger_pin);
+
+    xtimer_msleep(100); 
+
+    if(echo_time > 0){
+        dist = echo_time/58;
+    }
+	
+    return dist;
 }
 
 //detect motion pir
 int detect_motion(void){ 
     int motion = 0;
     if (pir_get_status(&dev) != PIR_STATUS_ACTIVE){
-        printf("Motion is detected \n"); 
-        motion=1;
+        printf("Motion is  detected \n"); 
+        motion =1;
+        
     }
     else{
-        printf("Motion not detected\n");
+        printf("Motion is not detected\n");
     }
     return motion;
 }
 
 //check bin level
-void check_bin_level(bool full){ 
+int check_bin_level(void){ 
    
-    int distance = read_distance(); //i put 100
+    int distance = read_distance(); //50 bin size, >40 bin is empty, <5 means full, 
     char msg[4];
     sprintf(msg, "%d", distance);
     publish(msg);
-    if (full=false && distance >= BIN_THRESHOLD ){
+    if ((full=0) && (distance <= BIN_THRESHOLD) ){
         gpio_set(led_pin);
-        full = true;
+        full =1;
     }
-    else if (full=true && distance < BIN_THRESHOLD){
+    else if ((full=1) && (distance > BIN_THRESHOLD)){
         gpio_clear(led_pin);
-        full =false;
+        full =0;
     }else{
-        printf("error check bin level")
+        printf("error check bin level");
     }
+    return full;
 }
 
 //initialization of sensors
@@ -263,18 +266,16 @@ void init_sensors(void){
     }*/
 
     //pir init
-     if (pir_init(&dev, &pir_params) == PIR_OK){
+     if (pir_init(&dev, &pir_parameters) == PIR_OK){
         printf("PIR sensor connected\n");
     }
     else{
     printf("Failed to connect to PIR sensor\n");
-    return 1;
     }
 
     //init led
     if (gpio_init(led_pin, GPIO_OUT)) {
         printf("Error to initialize GPIO_PIN(%d %d)\n", PORT_B, 10);
-        return -1;
     }
 
     //servo init
@@ -289,7 +290,7 @@ void mqtts_configuration(void){ //initializes the connection with the MQTT-SN br
     memset(subscriptions, 0, (1 * sizeof(emcute_sub_t)));
     thread_create(stack, sizeof(stack), EMCUTE_PRIO, 0, emcute_thread, NULL, "emcute");
     
-    ipv6_addr_add(DEFAULT_INTERFACE, DEVICE_IP_ADDRESS);
+    ipv6_addr_add(DEVICE_IP_ADDRESS);
 
     get_connection();
     subscribe();
@@ -298,13 +299,13 @@ void mqtts_configuration(void){ //initializes the connection with the MQTT-SN br
 int main(void){
     xtimer_sleep(5);
     init_sensors();
-    //mqtts_configuration();
-    bool full = false;
-    uint32_t dist;
-    int motion = detect_motion();
-    printf("value motion = %d \n",motion);
+    mqtts_configuration();
+    
 
     while(true){
+        int motion = detect_motion();
+        printf("value motion = %d \n",motion);
+
         if(motion==1 && bin_cover==0){
             //open servo
             servo_set(&servo, SERVO_MIN);
@@ -312,16 +313,13 @@ int main(void){
         }else{
             printf("error to open bin");
         }
-        xtimer_sleep(10);
+        xtimer_sleep(5);
         servo_set(&servo, SERVO_MAX);
         bin_cover=0;
 
-        if(check_bin_level(full)==true){
+        if(check_bin_level()==1){
             servo_set(&servo, SERVO_MIN);
             bin_cover=1;
-            xtimer_sleep(20);
-            servo_set(&servo, SERVO_MAX);
-            bin_cover=0;
         }
         xtimer_sleep(5);
     }  
